@@ -291,8 +291,10 @@ function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightCl
       attributionControl: false,
       maxPitch: 85,
       transformRequest: (url: string) => {
-        // Route all CARTO CDN requests through the internal Next.js proxy API
-        if (url.includes('cartocdn.com')) {
+        // Route CARTO CDN requests through the internal proxy only when enabled:
+        // CARTO refuses the proxy's server-side requests on Vercel, while the
+        // browser can load the tiles directly (the CSP allows https:).
+        if (process.env.NEXT_PUBLIC_PROXY_TILES === '1' && url.includes('cartocdn.com')) {
           const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
           return { url: `${baseUrl}/api/proxy-tiles?url=${encodeURIComponent(url)}` };
         }

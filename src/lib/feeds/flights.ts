@@ -1,15 +1,49 @@
 /**
  * OSIRIS — Flight feed fetcher (pure; no Next types).
- * Real-time aircraft from OpenSky (anonymous) + airplanes.live mil/ladd,
+ * Real-time aircraft from OpenSky (OAuth2 if configured, else anonymous)
+ * + airplanes.live mil/ladd + adsb.lol (mil and regional points over Europe),
  * classified into commercial / private / jet / military, with GPS-jamming zones.
  */
 
-function fetchWithTimeout(url: string, ms: number): Promise<Response | null> {
+function fetchWithTimeout(url: string, ms: number, init?: RequestInit): Promise<Response | null> {
   return Promise.race([
-    fetch(url),
+    fetch(url, init),
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
   ]).catch(() => null);
 }
+
+// OpenSky refuses anonymous requests from most cloud hosts (Vercel included).
+// With OPENSKY_CLIENT_ID / OPENSKY_CLIENT_SECRET set, use an OAuth2 token.
+const OPENSKY_TOKEN_URL =
+  'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token';
+let openskyToken: { value: string; expiresAt: number } | null = null;
+
+async function openskyAuthHeaders(): Promise<Record<string, string>> {
+  const id = process.env.OPENSKY_CLIENT_ID;
+  const secret = process.env.OPENSKY_CLIENT_SECRET;
+  if (!id || !secret) return {};
+  if (!openskyToken || openskyToken.expiresAt < Date.now() + 60_000) {
+    const res = await fetchWithTimeout(OPENSKY_TOKEN_URL, 10000, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'client_credentials', client_id: id, client_secret: secret }),
+    });
+    if (!res?.ok) return {};
+    try {
+      const t = await res.json();
+      openskyToken = { value: t.access_token, expiresAt: Date.now() + (t.expires_in || 1800) * 1000 };
+    } catch { return {}; }
+  }
+  return { Authorization: `Bearer ${openskyToken.value}` };
+}
+
+// adsb.lol: keyless readsb-format feed (same shape as airplanes.live), used as a
+// fallback for commercial traffic when OpenSky is unavailable. Radius in nm (max 250).
+const ADSB_LOL_POINTS: [number, number][] = [
+  [47.4, 8.5], [44.8, 20.4], [50.0, 8.6], [48.9, 2.4], [48.2, 16.4],
+  [41.9, 12.5], [51.5, -0.1], [40.4, -3.7], [52.4, 13.4], [41.0, 28.9],
+];
+const READSB_HEADERS = { 'User-Agent': 'OSIRIS/1.0' };
 
 const HELI_TYPES = new Set([
   'R22','R44','R66','B06','B06T','B204','B205','B206','B212','B222','B230',
@@ -129,10 +163,14 @@ export interface FlightsPayload {
 }
 
 export async function fetchFlights(): Promise<FlightsPayload> {
-  const [osFetch, milFetch, laddFetch] = await Promise.all([
-    fetchWithTimeout('https://opensky-network.org/api/states/all', 45000),
-    fetchWithTimeout('https://api.airplanes.live/v2/mil', 20000),
-    fetchWithTimeout('https://api.airplanes.live/v2/ladd', 20000),
+  const osHeaders = await openskyAuthHeaders();
+  const [osFetch, milFetch, laddFetch, ...lolFetches] = await Promise.all([
+    fetchWithTimeout('https://opensky-network.org/api/states/all', 45000, { headers: osHeaders }),
+    fetchWithTimeout('https://api.airplanes.live/v2/mil', 20000, { headers: READSB_HEADERS }),
+    fetchWithTimeout('https://api.airplanes.live/v2/ladd', 20000, { headers: READSB_HEADERS }),
+    fetchWithTimeout('https://api.adsb.lol/v2/mil', 20000, { headers: READSB_HEADERS }),
+    ...ADSB_LOL_POINTS.map(([lat, lon]) =>
+      fetchWithTimeout(`https://api.adsb.lol/v2/point/${lat}/${lon}/250`, 20000, { headers: READSB_HEADERS })),
   ]);
 
   const allRaw: any[] = [];
@@ -156,7 +194,7 @@ export async function fetchFlights(): Promise<FlightsPayload> {
     } catch { /* skip bad payload */ }
   }
 
-  for (const f of [milFetch, laddFetch]) {
+  for (const f of [milFetch, laddFetch, ...lolFetches]) {
     if (f?.ok) {
       try {
         const data = await f.json();

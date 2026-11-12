@@ -4,7 +4,9 @@ let redis: Redis | null = null;
 
 export function getRedis(): Redis {
   if (!redis) {
-    redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
+    // KV_URL is the name Vercel's Upstash integration uses for the same URL.
+    const url = process.env.REDIS_URL ?? process.env.KV_URL ?? 'redis://localhost:6379';
+    redis = new Redis(url, {
       lazyConnect: false,
       maxRetriesPerRequest: 2,
     });

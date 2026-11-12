@@ -349,12 +349,19 @@ async function fetchVesselApiFallback() {
 // request open briefly to let the stream fill the cache before answering.
 const AIS_MIN_SHIPS = 500;
 const AIS_WARMUP_MS = 8000;
+// Even with a full cache, listen briefly on every request so the picture keeps
+// growing and updating (positions are persisted to Redis between instances).
+const AIS_MIN_COLLECT_MS = 1500;
 
 export async function GET() {
   connectAisStream();
-  if (process.env.AIS_API_KEY && shipsCache.size < AIS_MIN_SHIPS) {
-    const deadline = Date.now() + AIS_WARMUP_MS;
-    while (shipsCache.size < AIS_MIN_SHIPS && Date.now() < deadline) {
+  if (process.env.AIS_API_KEY) {
+    const start = Date.now();
+    const deadline = start + AIS_WARMUP_MS;
+    while (
+      Date.now() < deadline &&
+      (shipsCache.size < AIS_MIN_SHIPS || Date.now() - start < AIS_MIN_COLLECT_MS)
+    ) {
       await new Promise((r) => setTimeout(r, 250));
     }
   }

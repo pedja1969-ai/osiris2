@@ -149,11 +149,15 @@ function startRedisFlusher() {
       const redis = getRedis();
       const pipeline = redis.pipeline();
       const toDelete: string[] = [];
+      // One multi-field HSET per flush instead of one per ship: hosted Redis
+      // (Upstash) bills per command.
+      const toSet: Record<string, string> = {};
       for (const mmsi of dirty) {
         const ship = shipsCache.get(mmsi);
-        if (ship) pipeline.hset(AIS_REDIS_KEY, String(mmsi), JSON.stringify(ship));
+        if (ship) toSet[String(mmsi)] = JSON.stringify(ship);
         else toDelete.push(String(mmsi));
       }
+      if (Object.keys(toSet).length) pipeline.hset(AIS_REDIS_KEY, toSet);
       if (toDelete.length) pipeline.hdel(AIS_REDIS_KEY, ...toDelete);
       pipeline.pexpire(AIS_REDIS_KEY, AIS_STALE_MS * 2);
       await pipeline.exec();

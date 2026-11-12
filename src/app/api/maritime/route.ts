@@ -161,6 +161,10 @@ function startRedisFlusher() {
   }, AIS_FLUSH_MS);
 }
 
+// Connection health, returned as `ais_status` so a missing feed can be diagnosed
+// from the browser without server logs.
+const aisDiag = { messages: 0, lastError: '', lastClose: '' };
+
 function connectAisStream() {
   if (globalForAis.isAisConnecting) return;
   // A socket already connecting or open (readyState 0/1) needs no second one.
@@ -236,6 +240,8 @@ function connectAisStream() {
   ws.on("message", (data) => {
     try {
       const parsed = JSON.parse(data.toString());
+      aisDiag.messages++;
+      if (parsed.error) aisDiag.lastError = String(parsed.error);
       const mmsi = parsed.MetaData?.MMSI;
       if (!mmsi) return;
 
@@ -313,12 +319,14 @@ function connectAisStream() {
     }
   });
 
-  ws.on("close", () => {
+  ws.on("close", (code, reason) => {
+    aisDiag.lastClose = `${code} ${reason?.toString() || ''}`.trim();
     globalForAis.isAisConnecting = false;
     setTimeout(connectAisStream, 5000); // Reconnect
   });
 
-  ws.on("error", () => {
+  ws.on("error", (err) => {
+    aisDiag.lastError = err?.message || 'socket error';
     ws.close();
   });
 }
@@ -442,6 +450,13 @@ export async function GET() {
     total_chokepoints: dynamicChokepoints.length,
     total_ships: ships.length,
     kpler_status: kplerStatus,
+    ais_status: {
+      key_configured: Boolean(process.env.AIS_API_KEY),
+      socket_state: globalForAis.aisSocket?.readyState ?? null,
+      messages_received: aisDiag.messages,
+      last_error: aisDiag.lastError || null,
+      last_close: aisDiag.lastClose || null,
+    },
     timestamp: new Date().toISOString(),
   }, {
     headers: { 

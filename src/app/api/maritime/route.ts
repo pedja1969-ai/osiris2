@@ -108,6 +108,7 @@ const globalForAis = globalThis as unknown as {
   aisDirty: Set<number>;
   aisFlusher: ReturnType<typeof setInterval> | null;
   aisHydrated: boolean;
+  aisSocket: WebSocket | null;
 };
 
 if (!globalForAis.shipsCache) {
@@ -116,6 +117,7 @@ if (!globalForAis.shipsCache) {
   globalForAis.aisDirty = new Set();
   globalForAis.aisFlusher = null;
   globalForAis.aisHydrated = false;
+  globalForAis.aisSocket = null;
 }
 
 const shipsCache = globalForAis.shipsCache;
@@ -161,6 +163,9 @@ function startRedisFlusher() {
 
 function connectAisStream() {
   if (globalForAis.isAisConnecting) return;
+  // A socket already connecting or open (readyState 0/1) needs no second one.
+  const live = globalForAis.aisSocket;
+  if (live && live.readyState <= 1) return;
   const apiKey = process.env.AIS_API_KEY;
   if (!apiKey) return;
 
@@ -169,6 +174,7 @@ function connectAisStream() {
 
   try {
     ws = new WebSocket("wss://stream.aisstream.io/v0/stream");
+    globalForAis.aisSocket = ws;
   } catch (e) {
     globalForAis.isAisConnecting = false;
     return;
@@ -326,7 +332,21 @@ async function fetchVesselApiFallback() {
   // Mock data removed per user request. We only rely on real live stream data.
 }
 
+// On serverless hosts (Vercel) the instance is paused between requests, so the
+// stream only delivers while a request runs. When few ships are known, keep the
+// request open briefly to let the stream fill the cache before answering.
+const AIS_MIN_SHIPS = 500;
+const AIS_WARMUP_MS = 8000;
+
 export async function GET() {
+  connectAisStream();
+  if (process.env.AIS_API_KEY && shipsCache.size < AIS_MIN_SHIPS) {
+    const deadline = Date.now() + AIS_WARMUP_MS;
+    while (shipsCache.size < AIS_MIN_SHIPS && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
   // Trigger Hybrid Fallback
   await fetchVesselApiFallback();
 
